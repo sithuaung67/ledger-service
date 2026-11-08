@@ -1,0 +1,112 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AccountKind {
+  AVAILABLE // a wallet's spendable funds
+  HELD      // a wallet's funds reserved by open holds
+  SYSTEM    // platform accounts, e.g. the outside world for deposits and withdrawals
+}
+
+enum EntryType {
+  DEPOSIT
+  WITHDRAWAL
+  TRANSFER
+  HOLD
+  CAPTURE
+  RELEASE
+}
+
+enum HoldStatus {
+  OPEN
+  CAPTURED
+  RELEASED
+}
+
+model Wallet {
+  id        String   @id @default(uuid()) @db.Uuid
+  ownerId   String   @unique @map("owner_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  accounts  Account[]
+  holds     Hold[]
+
+  @@map("wallets")
+}
+
+/// Balance is a cache of SUM(postings.amount) for the account, kept in the same
+/// transaction as every posting. The invariant check proves they never drift.
+model Account {
+  id            String      @id @default(uuid()) @db.Uuid
+  code          String      @unique
+  kind          AccountKind
+  walletId      String?     @map("wallet_id") @db.Uuid
+  wallet        Wallet?     @relation(fields: [walletId], references: [id])
+  /// Minor units (cents). Never a float.
+  balance       BigInt      @default(0)
+  allowNegative Boolean     @default(false) @map("allow_negative")
+  createdAt     DateTime    @default(now()) @map("created_at")
+  postings      Posting[]
+
+  @@unique([walletId, kind])
+  @@map("accounts")
+}
+
+/// Immutable. A trigger rejects UPDATE and DELETE.
+model JournalEntry {
+  id          String    @id @default(uuid()) @db.Uuid
+  type        EntryType
+  description String?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  postings    Posting[]
+
+  @@map("journal_entries")
+}
+
+/// Immutable. Signed amount in minor units: positive increases the account balance.
+/// A deferred constraint trigger checks that each entry's postings sum to zero.
+model Posting {
+  id        BigInt       @id @default(autoincrement())
+  entryId   String       @map("entry_id") @db.Uuid
+  entry     JournalEntry @relation(fields: [entryId], references: [id])
+  accountId String       @map("account_id") @db.Uuid
+  account   Account      @relation(fields: [accountId], references: [id])
+  amount    BigInt
+  createdAt DateTime     @default(now()) @map("created_at")
+
+  @@index([accountId, id])
+  @@index([entryId])
+  @@map("postings")
+}
+
+model Hold {
+  id            String     @id @default(uuid()) @db.Uuid
+  walletId      String     @map("wallet_id") @db.Uuid
+  wallet        Wallet     @relation(fields: [walletId], references: [id])
+  amount        BigInt
+  status        HoldStatus @default(OPEN)
+  holdEntryId   String     @map("hold_entry_id") @db.Uuid
+  settleEntryId String?    @map("settle_entry_id") @db.Uuid
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+
+  @@index([walletId, status])
+  @@map("holds")
+}
+
+/// Stored in the same transaction as the money movement, so a replay either sees
+/// the committed result or nothing at all.
+model IdempotencyRecord {
+  key          String   @id
+  scope        String
+  requestHash  String   @map("request_hash")
+  statusCode   Int      @map("status_code")
+  responseBody Json     @map("response_body")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("idempotency_records")
+}
